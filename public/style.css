@@ -51,6 +51,17 @@ legend{padding:0 .45rem;color:var(--muted)}
 .item time{font-size:.84rem}
 .item.unread{border-left:4px solid var(--accent)}
 .item p{white-space:nowrap;text-overflow:ellipsis;overflow:hidden;margin:0;color:var(--muted)}
+.mission-item{align-items:center}
+.mission-title{overflow-wrap:anywhere}
+.mission-title.mission-completed{text-decoration:line-through;text-decoration-thickness:.1em;color:var(--muted)}
+.mission-meta,.mission-actions{display:flex;align-items:center;gap:.55rem;flex-wrap:wrap}
+.mission-meta{color:var(--muted);font-size:.875rem;margin-top:.3rem}
+.mission-meta time{margin-left:.3rem}
+.mission-eye{display:inline-flex}
+.mission-eye svg,.mission-button svg{width:1.1rem;height:1.1rem}
+.mission-button{width:2.1rem;height:2.1rem;padding:0;border-radius:7px}
+.mission-edit{grid-column:1/-1;display:grid;gap:.65rem;margin-top:.2rem;padding-top:.65rem;border-top:1px solid var(--border)}
+.mission-edit[hidden]{display:none}
 .badge{border:1px solid var(--border);border-radius:999px;padding:.17rem .55rem;color:var(--accent);font-size:.82rem;display:inline-block}
 .tabs{display:flex;flex-wrap:wrap;gap:.45rem;margin-bottom:1rem}
 .tabs [aria-current=page]{border-color:var(--accent);color:var(--accent)}
@@ -64,10 +75,6 @@ legend{padding:0 .45rem;color:var(--muted)}
 .auth .panel{margin:0}
 #notice{position:fixed;bottom:1rem;right:1rem;z-index:5;max-width:min(26rem,calc(100% - 2rem));border-radius:8px}
 #notice:not(:empty){border:1px solid var(--border);background:var(--surface);color:var(--text);padding:.8rem 1rem;box-shadow:0 5px 22px #0004}
-dialog{max-width:min(42rem,calc(100% - 2rem));border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);color:var(--text);padding:1.2rem}
-dialog::backdrop{background:#000a}
-dialog img{display:block;max-width:100%;max-height:70vh;object-fit:contain}
-dialog form{display:flex;justify-content:end;margin-bottom:.75rem}
 code{overflow-wrap:anywhere}
 details{margin-top:.5rem}
 summary{cursor:pointer;color:var(--primary)}
@@ -77,6 +84,8 @@ aside{border-right:0;border-bottom:1px solid var(--border);gap:.6rem;padding:.75
 aside nav{display:flex;flex-wrap:wrap;gap:.2rem}
 aside nav a{font-size:.875rem;padding:.36rem .5rem}
 .item{grid-template-columns:1fr;gap:.25rem}
+.mission-item{grid-template-columns:minmax(0,1fr) auto;gap:.6rem}
+.mission-actions{justify-content:end}
 }
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation:none!important;transition:none!important}}
 body.reduced *,body.reduced *::before,body.reduced *::after{scroll-behavior:auto!important;animation:none!important;transition:none!important}

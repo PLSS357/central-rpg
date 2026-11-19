@@ -3,7 +3,7 @@ import { readFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { randomUUID as uuid } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { token, digest, hashPassword, validPassword, fail, string, parseUpload } from './security.mjs';
+import { token, digest, hashPassword, validPassword, fail, string } from './security.mjs';
 
 const directory = resolve(process.env.DATA_DIR || './data');
 mkdirSync(directory, { recursive: true });
@@ -77,23 +77,20 @@ function resource(id,m) {
 }
 function serialize(r,m, expanded=false) {
   const master = m.role === 'gm';
-  const detail = JSON.parse(r.detail);
-  if (!master) {
-    detail.objectives = detail.objectives.filter(o => !o.hidden && (!o.unlock || o.unlock <= now()));
-    if (detail.progress === 'individual') {
-      const personal = detail.individual?.[m.user];
-      detail.state = personal?.state || detail.state;
-      for (const o of detail.objectives) o.state = personal?.objectives?.[o.id] || o.state;
-    }
-    delete detail.individual;
-  }
+  const stored = JSON.parse(r.detail);
+  const progress = stored.progress==='individual'?'individual':'shared';
+  const individual = !master && progress==='individual';
+  const hasRead = get('SELECT 1 FROM deliveries WHERE resource=? AND read IS NOT NULL'+(individual?' AND user=?':''),r.id,...(individual?[m.user]:[]));
+  const completed = stored.state==='completed' || (individual && stored.individual?.[m.user]?.state==='completed');
+  const detail = {progress,state:completed?'completed':hasRead?'in_progress':'available'};
   const own = get('SELECT read FROM deliveries WHERE resource=? AND user=?',r.id,m.user);
+  const counts=master ? get('SELECT count(*) AS recipientCount,count(read) AS readCount FROM deliveries WHERE resource=?',r.id) : {};
   return {
-    id:r.id, title:r.title, body:r.body, created:r.created, published:r.published,
+    id:r.id, title:r.title, created:r.created, published:r.published,
+    ...counts,
     unread:Boolean(own && own.read===null), detail,
-    files:expanded ? all('SELECT id,name,mime,length(data) AS bytes FROM files WHERE resource=?',r.id):[],
     receipts:expanded && (master || r.author===m.user) ? all('SELECT u.id,u.name,d.read FROM deliveries d JOIN users u ON u.id=d.user WHERE d.resource=? ORDER BY u.name',r.id):undefined,
-    history:expanded && master ? all("SELECT action,timestamp FROM audit WHERE campaign=? AND resource=? AND action IN ('registro criado','missão publicada','revelação publicada','missão atualizada') ORDER BY id DESC LIMIT 100",m.campaign,r.id):undefined
+    history:expanded && master ? all("SELECT action,timestamp FROM audit WHERE campaign=? AND resource=? AND action IN ('registro criado','missão publicada','revelação publicada','missão atualizada','missão concluída') ORDER BY id DESC LIMIT 100",m.campaign,r.id):undefined
   };
 }
 function list(m,url) {
@@ -105,16 +102,16 @@ function list(m,url) {
   }
   const q = (url.searchParams.get('q') || '').slice(0,200);
   const cursor = url.searchParams.get('before');
-  if (q) { filters.push("instr(lower(r.title || ' ' || r.body),lower(?))>0"); args.push(q); }
-  const priority=url.searchParams.get('priority');
+  if (q) { filters.push("instr(lower(r.title),lower(?))>0"); args.push(q); }
   const state=url.searchParams.get('state');
-  if (['low','normal','high'].includes(priority)) { filters.push("json_extract(r.detail,'$.priority')=?"); args.push(priority); }
   if (states.includes(state)) {
-    if (m.role==='gm') filters.push("json_extract(r.detail,'$.state')=?");
-    else {
-      filters.push("coalesce(json_extract(r.detail,?),json_extract(r.detail,'$.state'))=?");
-      args.push('$.individual."'+m.user+'".state');
-    }
+    const personal=m.role!=='gm';
+    const completed=personal?" OR (json_extract(r.detail,'$.progress')='individual' AND json_extract(r.detail,?)='completed')":'';
+    const read=personal?" AND (coalesce(json_extract(r.detail,'$.progress'),'shared')<>'individual' OR d.user=?)":'';
+    filters.push(`(CASE WHEN json_extract(r.detail,'$.state')='completed'${completed} THEN 'completed'
+      WHEN EXISTS(SELECT 1 FROM deliveries d WHERE d.resource=r.id AND d.read IS NOT NULL${read}) THEN 'in_progress'
+      ELSE 'available' END)=?`);
+    if(personal) args.push('$.individual."'+m.user+'".state',m.user);
     args.push(state);
   }
   if (cursor) {
@@ -127,30 +124,24 @@ function list(m,url) {
   const last = page.at(-1);
   return { items:page.map(r=>serialize(r,m)), next:rows.length>25?[last.published||last.created,last.id].join(','):null };
 }
-const states = ['locked','available','in_progress','completed','failed','archived'];
-const objectiveStates = ['pending','active','completed','failed'];
-const choice = (v, options, fallback) => options.includes(v) ? v : fallback;
-function objective(item,existing={}) {
-  return {id:existing.id || uuid(),title:string(item.title,160),description:string(item.description??'',2000,false),
-    state:choice(item.state,objectiveStates,existing.state || 'pending'),hidden:item.hidden===true,unlock:existing.unlock ?? null};
-}
-function dateValue(input) {
-  if (input === undefined || input === null || input === '') return null;
-  if (!Number.isSafeInteger(input) || input < 0 || input > 8_640_000_000_000_000) fail(400,'Data inválida.');
-  return input;
-}
+const states = ['available','in_progress','completed'];
 function missionHistory(m,url) {
   const before=Number(url.searchParams.get('before')) || Number.MAX_SAFE_INTEGER;
-  const rows=all(`SELECT a.id,a.timestamp,r.id AS mission,r.title,
-      CASE WHEN a.action='missão atualizada' THEN 'Missão atualizada' ELSE 'Missão publicada' END AS action
-    FROM audit a JOIN resources r ON r.id=a.resource AND r.campaign=a.campaign
-    WHERE a.campaign=? AND a.id<? AND r.kind='mission' AND r.status='published' AND r.release<=?
-      AND (a.action IN ('missão publicada','revelação publicada','missão atualizada')
-        OR (a.action='registro criado' AND json_extract(a.detail,'$.status')='published'))
-      AND (?='gm' OR (
-        EXISTS(SELECT 1 FROM deliveries d WHERE d.resource=r.id AND d.user=?)
-        AND (json_extract(a.detail,'$.target') IS NULL OR json_extract(a.detail,'$.target')=?)))
-    ORDER BY a.id DESC LIMIT 26`,m.campaign,before,now(),m.role,m.user,m.user);
+  const rows=all(`WITH latest AS (
+      SELECT r.id AS mission,r.title,max(a.id) AS event
+      FROM audit a JOIN resources r ON r.id=a.resource AND r.campaign=a.campaign
+      WHERE a.campaign=? AND r.kind='mission' AND r.status='published' AND r.release<=?
+        AND (a.action IN ('missão publicada','revelação publicada','missão atualizada','missão concluída')
+          OR (a.action='registro criado' AND json_extract(a.detail,'$.status')='published'))
+        AND (?='gm' OR (
+          EXISTS(SELECT 1 FROM deliveries d WHERE d.resource=r.id AND d.user=?)
+          AND (json_extract(a.detail,'$.target') IS NULL OR json_extract(a.detail,'$.target')=?)))
+      GROUP BY r.id
+    )
+    SELECT a.id,a.timestamp,l.mission,l.title,
+      CASE a.action WHEN 'missão atualizada' THEN 'Missão atualizada' WHEN 'missão concluída' THEN 'Missão concluída' ELSE 'Missão publicada' END AS action
+    FROM latest l JOIN audit a ON a.id=l.event
+    WHERE a.id<? ORDER BY a.id DESC LIMIT 26`,m.campaign,now(),m.role,m.user,m.user,before);
   const items=rows.slice(0,25);
   return {items,next:rows.length>25?items.at(-1).id:null};
 }
@@ -162,43 +153,29 @@ function createMission(m,b) {
   const recipients=mode==='all'?active:[...new Set(Array.isArray(b.targets)?b.targets:[])];
   if (!recipients.length || recipients.length>250 || recipients.some(id=>!active.includes(id))) fail(400,'Selecione jogadores ativos para receber a missão.');
   const title=string(b.title,160);
-  const body=string(b.body??'',12000,false);
-  if (b.files && (!Array.isArray(b.files) || b.files.length>3)) fail(400,'Envie até três anexos.');
-  const uploads=(b.files||[]).map(parseUpload);
-  if (b.objectives && (!Array.isArray(b.objectives) || b.objectives.length>30)) fail(400,'Envie até 30 objetivos.');
-  const detail={state:choice(b.state,states,'available'),priority:choice(b.priority,['low','normal','high'],'normal'),
-    progress:choice(b.progress,['shared','individual'],'shared'),due:dateValue(b.due),objectives:(b.objectives||[]).map(x=>objective(x)),individual:{}};
+  if (b.files!==undefined) fail(400,'Missões não aceitam anexos.');
+  const detail={progress:b.progress==='individual'?'individual':'shared'};
   const id=uuid();
   const timestamp=now();
-  run("INSERT INTO resources(id,campaign,author,kind,mode,title,body,status,created,release,published,detail) VALUES(?,?,?,'mission',?,?,?,'published',?,?,?,?)",id,m.campaign,m.user,mode,title,body,timestamp,timestamp,timestamp,JSON.stringify(detail));
+  run("INSERT INTO resources(id,campaign,author,kind,mode,title,body,status,created,release,published,detail) VALUES(?,?,?,'mission',?,?,'','published',?,?,?,?)",id,m.campaign,m.user,mode,title,timestamp,timestamp,timestamp,JSON.stringify(detail));
   for (const user of recipients) run('INSERT INTO deliveries(resource,user) VALUES(?,?)',id,user);
-  for (const file of uploads) run('INSERT INTO files VALUES(?,?,?,?,?)',uuid(),id,file.name,file.mime,file.bytes);
   audit(m.campaign,m.user,'missão publicada',id);
   return {id,count:recipients.length};
 }
 function updateMission(m,r,b) {
-  onlyMaster(m);
-  const detail = JSON.parse(r.detail);
-  if (b.target) {
-    if (detail.progress!=='individual' || !get('SELECT 1 FROM deliveries WHERE resource=? AND user=?',r.id,b.target)) fail(400,'Destinatário inválido.');
-    const personal = detail.individual[b.target] ??= {objectives:{}};
-    if (states.includes(b.state)) personal.state=b.state;
-    if (b.objective && objectiveStates.includes(b.objectiveState) && detail.objectives.some(x=>x.id===b.objective)) personal.objectives[b.objective]=b.objectiveState;
-  } else {
-    detail.state=choice(b.state,states,detail.state);
-    detail.priority=choice(b.priority,['low','normal','high'],detail.priority);
-    if (b.due!==undefined) detail.due=dateValue(b.due);
-    if (b.objectives!==undefined) {
-      if (!Array.isArray(b.objectives) || b.objectives.length>30) fail(400,'Objetivos inválidos.');
-      detail.objectives=b.objectives.map(x=>objective(x,detail.objectives.find(o=>o.id===x.id)));
-    }
+  const title=string(b.title??r.title,160);
+  if (title===r.title) return {ok:true};
+  run('UPDATE resources SET title=? WHERE id=?',title,r.id);
+  audit(m.campaign,m.user,'missão atualizada',r.id);
+  return {ok:true};
+}
+function completeMission(m,r) {
+  const detail=JSON.parse(r.detail);
+  if(detail.state!=='completed') {
+    detail.state='completed';
+    run('UPDATE resources SET detail=? WHERE id=?',JSON.stringify(detail),r.id);
+    audit(m.campaign,m.user,'missão concluída',r.id);
   }
-  run('UPDATE resources SET title=?,body=?,detail=? WHERE id=?',b.target||b.title===undefined?r.title:string(b.title,160),b.target||b.body===undefined?r.body:string(b.body,12000,false),JSON.stringify(detail),r.id);
-  if (r.status==='published') {
-    if(b.target) run('UPDATE deliveries SET read=NULL WHERE resource=? AND user=? AND user<>?',r.id,b.target,m.user);
-    else run('UPDATE deliveries SET read=NULL WHERE resource=? AND user<>?',r.id,m.user);
-  }
-  audit(m.campaign,m.user,'missão atualizada',r.id,{state:b.state||null,target:b.target||null});
   return {ok:true};
 }
 const rate = new Map();
@@ -236,9 +213,10 @@ function login(res,user) {
 function theme(value) {
   if (!value || typeof value!=='object') fail(400,'Tema inválido.');
   const themes=['terminal','modern','archive','arcane'];
-  const preset=choice(value.preset,themes,'arcane');
+  const preset=themes.includes(value.preset)?value.preset:'arcane';
   const color = (key) => /^#[0-9a-f]{6}$/i.test(value[key]||'') ? value[key] : null;
-  return {preset,primary:color('primary'),secondary:color('secondary'),accent:color('accent'),radius:choice(value.radius,[4,8,12,18,24],12),mode:choice(value.mode,['light','dark'],'dark')};
+  return {preset,primary:color('primary'),secondary:color('secondary'),accent:color('accent'),
+    radius:[4,8,12,18,24].includes(value.radius)?value.radius:12,mode:value.mode==='light'?'light':'dark'};
 }
 const staticFiles = new Map([
   ['/app.js',['application/javascript','app.js']],
@@ -250,10 +228,10 @@ function eventStream(req,res,m) {
     const rows=all(`SELECT r.id,r.status,r.published,d.read,
       (SELECT max(a.id) FROM audit a WHERE a.resource=r.id AND
         (?='gm' OR a.action<>'missão atualizada' OR json_extract(a.detail,'$.target') IS NULL OR json_extract(a.detail,'$.target')=?)) AS revision,
-      CASE WHEN r.author=? OR ?='gm' THEN (SELECT max(read) FROM deliveries WHERE resource=r.id) END AS receipts
+      CASE WHEN ?='gm' OR coalesce(json_extract(r.detail,'$.progress'),'shared')<>'individual' THEN (SELECT max(read) FROM deliveries WHERE resource=r.id) END AS receipts
       FROM resources r LEFT JOIN deliveries d ON d.resource=r.id AND d.user=?
       WHERE r.campaign=? AND r.kind='mission' AND r.status='published' AND r.release<=? AND (?='gm' OR d.user IS NOT NULL)
-      ORDER BY r.id`,m.role,m.user,m.user,m.role,m.user,m.campaign,now(),m.role);
+      ORDER BY r.id`,m.role,m.user,m.role,m.user,m.campaign,now(),m.role);
     return digest(JSON.stringify(rows.map(row=>[row.id,row.status,row.published,row.read,row.revision,row.receipts])));
   }
   let last=fingerprint();
@@ -389,14 +367,6 @@ const server=createServer(async(req,res)=>{
       if(action==='roster') return send({members:m.role==='gm'?all('SELECT u.id,u.name,coalesce(h.handle,u.email) AS login,u.hash IS NOT NULL AS activated,m.role,m.active,m.character FROM members m JOIN users u ON u.id=m.user LEFT JOIN account_handles h ON h.user=u.id WHERE m.campaign=? ORDER BY u.name',m.campaign):all("SELECT u.id,u.name FROM members m JOIN users u ON u.id=m.user WHERE m.campaign=? AND m.active=1 AND m.role='gm' ORDER BY u.name",m.campaign)});
       if(action==='resources' && !id) return send(list(m,url));
       if(action==='resources') return send(serialize(resource(id,m),m,true));
-      if(action==='files' && id) {
-        const file=get('SELECT * FROM files WHERE id=?',id);
-        if(!file) fail(404,'Arquivo indisponível.');
-        resource(file.resource,m);
-        const preview=url.searchParams.get('preview')==='1' && ['image/png','image/jpeg'].includes(file.mime);
-        res.writeHead(200,{'Content-Type':preview?file.mime:'application/octet-stream','Content-Disposition':(preview?'inline':'attachment')+"; filename*=UTF-8''"+encodeURIComponent(file.name).replace(/['()*]/g,c=>'%'+c.charCodeAt(0).toString(16))});
-        return res.end(file.data);
-      }
       if(action==='history') return send(missionHistory(m,url));
       fail(404,'Rota indisponível.');
     }
@@ -412,11 +382,18 @@ const server=createServer(async(req,res)=>{
       }
       if(action==='read') {
         const r=resource(id,m);
-        if(r.status!=='published') fail(404,'Registro indisponível.');
         run('UPDATE deliveries SET read=coalesce(read,?) WHERE resource=? AND user=?',now(),id,m.user);
+        return {ok:true,state:serialize(r,m).detail.state};
+      }
+      if(['mission','complete-mission','delete-mission'].includes(action)) {
+        onlyMaster(m);
+        const mission=resource(id,m);
+        if(action==='mission') return updateMission(m,mission,b);
+        if(action==='complete-mission') return completeMission(m,mission);
+        run("UPDATE resources SET status='deleted' WHERE id=?",id);
+        audit(m.campaign,m.user,'missão apagada',id);
         return {ok:true};
       }
-      if(action==='mission') return updateMission(m,resource(id,m),b);
       if(action==='character') {
         run('UPDATE members SET character=? WHERE campaign=? AND user=?',string(b.name,100,false),m.campaign,m.user);
         return {ok:true};

@@ -1,7 +1,5 @@
 const root = document.querySelector('#app');
 const notice = document.querySelector('#notice');
-const dialog = document.querySelector('#dialog');
-const dialogBody = document.querySelector('#dialog-body');
 let page = {};
 let generation = 0;
 let noticeTimer;
@@ -10,37 +8,18 @@ let stream;
 let readObserver;
 const readPending = new Set();
 const esc = (v='') => String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const labels = {locked:'Bloqueada',available:'Disponível',in_progress:'Em andamento',completed:'Concluída',failed:'Falhou',archived:'Arquivada',pending:'Pendente',active:'Ativo',low:'Baixa',normal:'Normal',high:'Alta',shared:'Compartilhado',individual:'Individual',terminal:'Terminal Sombrio',modern:'Mensageiro Moderno',archive:'Arquivo Confidencial',arcane:'Fantasia Arcana'};
+const labels = {'':'Todas',available:'Disponível',in_progress:'Em andamento',completed:'Concluída',shared:'Compartilhado',individual:'Individual',terminal:'Terminal Sombrio',modern:'Mensageiro Moderno',archive:'Arquivo Confidencial',arcane:'Fantasia Arcana'};
 const titleOf = k=>labels[k]||k;
 const options = (items,selected) => items.map(v=>`<option value="${esc(v)}" ${v===selected?'selected':''}>${esc(titleOf(v))}</option>`).join('');
-const states=['locked','available','in_progress','completed','failed','archived'];
-const objectiveStates=['pending','active','completed','failed'];
+const states=['available','in_progress','completed'];
 function date(value) {
   return value ? new Intl.DateTimeFormat('pt-BR',{dateStyle:'short',timeStyle:'short',timeZone:page.summary?.zone}).format(value) : '—';
-}
-function zonedTime(value) {
-  if (!value) return null;
-  const desired = Date.parse(value+'Z');
-  const formatter = new Intl.DateTimeFormat('sv-SE',{timeZone:page.summary.zone,dateStyle:'short',timeStyle:'medium'});
-  let result=desired;
-  for(let i=0;i<3;i++) result+=desired-Date.parse(formatter.format(result).replace(' ','T')+'Z');
-  if(formatter.format(result).slice(0,16).replace(' ','T')!==value) throw Error('Esse horário não existe no fuso da campanha.');
-  return result;
-}
-function localInput(value) {
-  if (!value) return '';
-  return new Intl.DateTimeFormat('sv-SE',{timeZone:page.summary.zone,dateStyle:'short',timeStyle:'short'}).format(value).replace(' ','T');
 }
 function flash(text) {
   notice.textContent=text;
   clearTimeout(noticeTimer);
   noticeTimer=setTimeout(()=>{ notice.textContent=''; },5500);
 }
-function showDialog(title,content) {
-  dialogBody.innerHTML=`<h2 id="dialog-title">${esc(title)}</h2>${content}`;
-  if (!dialog.open) dialog.showModal();
-}
-dialog.addEventListener('close',()=>{ dialogBody.replaceChildren(); });
 async function api(path, data) {
   const response=await fetch('/api/'+path,data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
   const result=await response.json();
@@ -57,7 +36,6 @@ const area=(text,name,value='',required='')=>`<label>${text}<textarea name="${na
 const submit=(text)=>`<button class="primary" type="submit">${text}</button>`;
 const action=(name,text,id='')=>`<button type="button" data-action="${name}" data-id="${esc(id)}">${text}</button>`;
 const brand='<span class="brand"><img src="/favicon.svg" alt=""><span class="wordmark">Central RPG</span></span>';
-const filesInput=field('Anexos · até 3 arquivos de 2 MB','files','type="file" multiple accept=".png,.jpg,.jpeg,.pdf,.txt"');
 const role=()=>page.summary?.role==='gm';
 const heading=(title,description='',extra='')=>`<header class="heading"><div>${page.summary?`<p class="kicker">${esc(page.summary.name)}</p>`:''}<h1>${esc(title)}</h1>${description?`<p class="muted">${esc(description)}</p>`:''}</div>${extra}</header>`;
 const empty=(text)=>`<div class="panel muted">${esc(text)}</div>`;
@@ -76,9 +54,10 @@ function authView(mode='login') {
 }
 function shell(content) {
   const navigation=[['missions','Missões'],['history','Histórico'],['settings','Configurações']];
-  const master=[['master','Painel do mestre'],['master/members','Participantes']];
-  const nav=(items,label)=>`<nav aria-label="${label}">${items.map(([path,name])=>`<a href="${href(path)}" data-route ${page.route===path?'aria-current="page"':''}>${name}</a>`).join('')}</nav>`;
-  root.innerHTML=`<div class="shell"><aside>${brand}${nav(navigation,'Campanha')}${role()?nav(master,'Área do mestre'):''}</aside><div class="stage"><header class="topbar"><div class="row"><a href="/campaigns" data-route>Campanhas</a><span class="muted">${role()?'Mestre':'Jogador'}</span><span id="unread" class="badge">${page.summary.unread} não lidas</span></div>${action('logout','Sair')}</header><main id="main">${content}</main></div></div>`;
+  if(role()) navigation.push(['master','Painel do mestre'],['master/members','Participantes']);
+  const active=page.route==='master/missions'?'missions':page.route;
+  const nav=`<nav aria-label="Campanha">${navigation.map(([path,name])=>`<a href="${href(path)}" data-route ${active===path?'aria-current="page"':''}>${name}</a>`).join('')}</nav>`;
+  root.innerHTML=`<div class="shell"><aside>${brand}${nav}</aside><div class="stage"><header class="topbar"><div class="row"><a href="/campaigns" data-route>Campanhas</a><span class="muted">${role()?'Mestre':'Jogador'}</span><span id="unread" class="badge">${page.summary.unread} não lidas</span></div>${action('logout','Sair')}</header><main id="main">${content}</main></div></div>`;
 }
 function applyTheme(theme) {
   document.body.dataset.preset=theme.preset||'arcane';
@@ -103,13 +82,39 @@ async function campaigns() {
   <section class="panel"><h2>Criar sala</h2><p class="muted">Você será o mestre desta sala.</p><form class="stack" data-form="campaign">${field('Nome da sala','name','required maxlength="100"')}${area('Descrição','description')}${submit('Criar sala')}</form></section>
   <section class="panel"><h2>Entrar em uma sala</h2><p class="muted">Use o código da sala para entrar como jogador.</p><form class="stack" data-form="join">${field('Código da sala','code','required maxlength="30" autocapitalize="characters" spellcheck="false"')}${field('Nome do personagem','character','required maxlength="100"')}${submit('Entrar na sala')}</form></section></main>`;
 }
+const missionIcons={
+  eye:'<path d="M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z"/><circle cx="12" cy="12" r="2.5"/>',
+  closed:'<path d="M3 9c2.5 3 5.5 4.5 9 4.5S18.5 12 21 9M6 12l-2 3M12 14v3m6-5 2 3"/>',
+  pencil:'<path d="m14 6 4 4M4 20l4.5-1 11-11a2.8 2.8 0 0 0-4-4l-11 11L4 20Z"/>',
+  complete:'<circle cx="12" cy="12" r="9"/><path d="m8 12 3 3 5-6"/>',
+  trash:'<path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5"/>'
+};
+const missionIcon=(name)=>`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${missionIcons[name]}</svg>`;
+const missionButton=(name,icon,label,id)=>`<button type="button" class="mission-button" data-action="${name}" data-id="${esc(id)}" aria-label="${label}" title="${label}">${missionIcon(icon)}</button>`;
 function card(r) {
-  return `<li class="item ${r.unread?'unread':''}"><div><b>${link('missions/'+r.id,r.title)}</b><div class="muted">${esc(titleOf(r.detail.state)+' · '+titleOf(r.detail.priority))}${r.unread?' · Não lida':''}</div><p>${esc(r.body)}</p></div><time>${date(r.published||r.created)}</time></li>`;
+  const completed=r.detail.state==='completed';
+  const read=role()?r.readCount>0:!r.unread;
+  const readLabel=role()?`${r.readCount} de ${r.recipientCount} jogadores leram`:(read?'Lida':'Não lida');
+  return `<li class="item mission-item ${r.unread?'unread':''}" id="mission-${esc(r.id)}" ${r.unread?`data-readable="${esc(r.id)}"`:''}>
+    <div class="mission-content">
+      <b class="mission-title ${completed?'mission-completed':''}">${esc(r.title)}</b>
+      <div class="mission-meta"><span class="mission-eye" role="img" aria-label="${esc(readLabel)}" title="${esc(readLabel)}">${missionIcon(read?'eye':'closed')}</span><span class="mission-state">${esc(titleOf(r.detail.state))}</span><time>${date(r.published||r.created)}</time></div>
+    </div>
+    ${role()?`<div class="mission-actions">
+      ${missionButton('edit-mission','pencil','Editar missão',r.id)}
+      ${completed?'':missionButton('complete-mission','complete','Concluir missão',r.id)}
+      ${missionButton('delete-mission','trash','Apagar missão',r.id)}
+    </div>`:''}
+    ${role()?`<form class="mission-edit" data-form="mission-edit" data-id="${esc(r.id)}" hidden>
+      ${field('Título','title',`required maxlength="160" value="${esc(r.title)}"`)}
+      <div class="row">${submit('Salvar')}${action('cancel-edit','Cancelar')}</div>
+    </form>`:''}
+  </li>`;
 }
 function filters() {
   const query=new URLSearchParams(location.search);
   return `<form class="toolbar" data-form="search">${field('Buscar missões','q',`type="search" maxlength="200" value="${esc(query.get('q')||'')}"`)}
-  ${select('Situação','state',['',...states],query.get('state')||'')}${select('Prioridade','priority',['','low','normal','high'],query.get('priority')||'')}<button>Buscar</button></form>`;
+  ${select('Situação','state',['',...states],query.get('state')||'')}<button>Buscar</button></form>`;
 }
 async function feed(before='') {
   const history=page.route==='history';
@@ -118,7 +123,7 @@ async function feed(before='') {
   return api(endpoint((history?'history':'resources')+'?'+query));
 }
 function historyCard(event) {
-  return `<li class="item"><div><b>${link('missions/'+event.mission,event.title)}</b><div class="muted">${esc(event.action)}</div></div><time>${date(event.timestamp)}</time></li>`;
+  return `<li class="item"><div><b>${esc(event.title)}</b><div class="muted">${esc(event.action)}</div></div><time>${date(event.timestamp)}</time></li>`;
 }
 function feedHTML(data) {
   const history=page.route==='history';
@@ -127,57 +132,19 @@ function feedHTML(data) {
 async function feedPage() {
   const data=await feed();
   const history=page.route==='history';
-  return (history?heading('Histórico','Publicações e atualizações das missões.'):heading('Missões','',role()?link('master/missions','Nova missão','button primary'):''))+
+  return (history?heading('Histórico','Última atividade de cada missão.'):heading('Missões','',role()?link('master/missions','Nova missão','button primary'):''))+
     (history?'':filters())+`<div id="live-list">${feedHTML(data)}</div>`;
-}
-function fileLinks(files) {
-  return files?.length?`<ul>${files.map(f=>`<li><a href="/api/${endpoint('files/'+f.id)}" download>${esc(f.name)}</a> ${['image/png','image/jpeg'].includes(f.mime)?action('preview','Visualizar',f.id):''}</li>`).join('')}</ul>`:'';
-}
-function receipts(r) {
-  return r.receipts?.length?`<details><summary>Confirmações de leitura</summary><ul>${r.receipts.map(x=>`<li>${esc(x.name)} · ${x.read?date(x.read):'Não lida'}</li>`).join('')}</ul></details>`:'';
-}
-function objectiveEditor(o={}) {
-  return `<fieldset class="stack" data-objective data-id="${esc(o.id||'')}"><legend>Objetivo</legend>
-  ${field('Título','objective-title',`required maxlength="160" value="${esc(o.title)}"`)}
-  ${field('Descrição','objective-description',`maxlength="2000" value="${esc(o.description)}"`)}
-  ${select('Estado','objective-state',objectiveStates,o.state||'pending')}
-  <label><input type="checkbox" name="objective-hidden" ${o.hidden?'checked':''}>Oculto para jogadores</label>
-  <div>${action('remove-objective','Remover objetivo')}</div></fieldset>`;
-}
-function missionEditor(r) {
-  return `<form class="panel stack" data-form="mission-edit" data-id="${r.id}"><h2>Editar missão</h2>
-  ${field('Título','title',`required maxlength="160" value="${esc(r.title)}"`)}${area('Descrição','body',r.body)}
-  ${select('Situação','state',states,r.detail.state)}${select('Prioridade','priority',['low','normal','high'],r.detail.priority)}
-  ${field('Prazo','due',`type="datetime-local" value="${localInput(r.detail.due)}"`)}
-  <p class="muted">Fuso da campanha · ${esc(page.summary.zone)}</p>
-  <div class="stack" data-objectives>${r.detail.objectives.map(objectiveEditor).join('')}</div>
-  <div class="row">${action('add-objective','Adicionar objetivo')}${submit('Salvar alterações')}</div></form>`;
-}
-async function missionDetail(id) {
-  const r=await api(endpoint('resources/'+id));
-  if(r.unread) readPending.add(r.id);
-  const d=r.detail;
-  return heading(r.title,'Missão',link('missions','Todas as missões','button'))+
-  `<section class="panel" data-readable="${r.id}"><div class="row">${badge(titleOf(d.state))}${badge('Prioridade '+titleOf(d.priority))}${badge('Progresso '+titleOf(d.progress).toLowerCase())}</div>
-  <div class="message">${esc(r.body)}</div><p class="muted">Prazo · ${date(d.due)}</p>${fileLinks(r.files)}${receipts(r)}</section>
-  <section class="panel"><h2>Objetivos</h2>${d.objectives.length?`<ul>${d.objectives.map(o=>`<li><strong>${esc(o.title)}</strong> · ${esc(titleOf(o.state))}${o.hidden?' · Oculto':''}${o.description?`<p class="muted">${esc(o.description)}</p>`:''}</li>`).join('')}</ul>`:'<p class="muted">Nenhum objetivo disponível.</p>'}</section>
-  ${role()?missionEditor(r):''}
-  ${role()&&d.progress==='individual'&&r.receipts.length?`<form class="panel stack" data-form="personal" data-id="${r.id}"><h2>Progresso individual</h2><label>Participante<select name="target">${r.receipts.map(p=>`<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></label>${select('Situação','state',['',...states],'')}
-  <label>Objetivo<select name="objective"><option value=""></option>${d.objectives.map(o=>`<option value="${o.id}">${esc(o.title)}</option>`).join('')}</select></label>${select('Estado do objetivo','objectiveState',objectiveStates,'pending')}${submit('Atualizar progresso individual')}
-  <details><summary>Progresso registrado</summary><ul>${r.receipts.map(p=>`<li>${esc(p.name)} · ${esc(titleOf(d.individual[p.id]?.state||d.state))}${d.objectives.map(o=>`<div>${esc(o.title)} · ${esc(titleOf(d.individual[p.id]?.objectives?.[o.id]||o.state))}</div>`).join('')}</li>`).join('')}</ul></details></form>`:''}
-  ${r.history?.length?`<section class="panel"><h2>Histórico de alterações</h2><ul>${r.history.map(a=>`<li>${esc(a.action)} · ${date(a.timestamp)}</li>`).join('')}</ul></section>`:''}`;
 }
 async function compose() {
   const roster=await api(endpoint('roster'));
   const players=roster.members.filter(u=>u.active&&u.role==='player');
   const people=players.map(u=>`<label><input type="checkbox" name="targets" value="${u.id}">${esc(u.character||u.name)}</label>`).join('');
   return heading('Nova missão')+`<form class="panel stack" data-form="compose" data-active="${players.length}">
-  ${field('Título','title','required maxlength="160"')}${area('Descrição','body')}
+  ${field('Título','title','required maxlength="160"')}
   <label>Audiência<select name="mode"><option value="broadcast">Jogadores selecionados</option><option value="all">Todos os jogadores</option></select></label>
   <fieldset data-targets><legend>Destinatários</legend>${people||'<p class="muted">Nenhum jogador disponível.</p>'}</fieldset><p id="audience" class="muted"></p>
-  ${select('Prioridade','priority',['low','normal','high'],'normal')}${select('Progresso','progress',['shared','individual'],'shared')}${select('Situação inicial','state',states,'available')}
-  ${field('Prazo','due','type="datetime-local"')}<div class="stack" data-objectives></div><div>${action('add-objective','Adicionar objetivo')}</div>
-  ${filesInput}<div>${submit('Publicar missão')}</div></form>`;
+  ${select('Progresso','progress',['shared','individual'],'shared')}
+  <div>${submit('Publicar missão')}</div></form>`;
 }
 async function participants() {
   const roster=await api(endpoint('roster'));
@@ -204,7 +171,7 @@ function themePage() {
 }
 async function content() {
   const [first,second]=page.route.split('/');
-  if(first==='missions') return second?missionDetail(second):feedPage();
+  if(first==='missions') return feedPage();
   if(first==='history') return feedPage();
   if(first==='settings') return heading('Configurações')+`<form class="panel stack" data-form="settings"><h2>Seu personagem</h2>${field('Nome do personagem','name',`value="${esc(page.summary.character)}" maxlength="100"`)}<label><input name="reduced" type="checkbox" ${localStorage.getItem('central-reduced')==='true'?'checked':''}>Desativar animações nesse dispositivo</label><div>${submit('Salvar preferências')}</div></form>${role()?themePage():''}`;
   if(first==='master'&&role()) {
@@ -215,19 +182,33 @@ async function content() {
   return heading('Página indisponível')+link('missions','Voltar às missões','button');
 }
 function markDisplayed() {
-  if(document.visibilityState!=='visible' || !page.slug) return;
+  if(document.visibilityState!=='visible'||page.route!=='missions'||role()) return;
   const current=generation;
   readObserver?.disconnect();
   readObserver=new IntersectionObserver(entries=>{
-    if(current!==generation || document.visibilityState!=='visible') return;
-    for(const {target,isIntersecting} of entries) {
+    if(current!==generation||document.visibilityState!=='visible') return;
+    for(const {target,isIntersecting,intersectionRatio} of entries) {
       const id=target.dataset.readable;
-      if(!isIntersecting || !readPending.delete(id)) continue;
+      if(!id||!isIntersecting||intersectionRatio<0.6||readPending.has(id)) continue;
+      readPending.add(id);
       readObserver.unobserve(target);
-      api(endpoint('read/'+id),{}).catch(()=>{if(current===generation) readPending.add(id);});
+      api(endpoint('read/'+id),{}).then(({state})=>{
+        if(current===generation) {
+          const row=document.getElementById('mission-'+id);
+          if(!row) return;
+          delete row.dataset.readable;
+          row.classList.remove('unread');
+          const eye=row.querySelector('.mission-eye');
+          eye.innerHTML=missionIcon('eye');
+          eye.title='Lida';
+          eye.setAttribute('aria-label','Lida');
+          row.querySelector('.mission-state').textContent=titleOf(state);
+          row.querySelector('.mission-title').classList.toggle('mission-completed',state==='completed');
+        }
+      }).catch(()=>{}).finally(()=>{if(current===generation) readPending.delete(id);});
     }
-  });
-  for(const node of document.querySelectorAll('[data-readable]')) if(readPending.has(node.dataset.readable)) readObserver.observe(node);
+  },{threshold:0.6});
+  for(const node of document.querySelectorAll('[data-readable]')) readObserver.observe(node);
 }
 function syncAudience(form) {
   if(!form) return;
@@ -244,7 +225,6 @@ async function render() {
   stream=null;
   readObserver?.disconnect();
   readPending.clear();
-  if(dialog.open) dialog.close();
   const [,first,slug,...segments]=location.pathname.split('/');
   if(first==='login') {
     const query=new URLSearchParams(location.search);
@@ -253,7 +233,8 @@ async function render() {
   root.innerHTML='<main id="main" aria-busy="true">Carregando…</main>';
   try {
     if(first!=='c'||!slug) { page={}; await campaigns(); return; }
-    page={slug,route:segments.join('/')||'missions'};
+    if(segments[0]==='missions'&&segments.length>1) history.replaceState({},'',`/c/${slug}/missions`);
+    page={slug,route:segments[0]==='missions'?'missions':segments.join('/')||'missions'};
     const [summary,identity]=await Promise.all([api(endpoint('summary')),api('campaigns')]);
     if(seq!==generation) return;
     page.summary=summary;
@@ -287,7 +268,10 @@ async function refresh(seq) {
       if(seq===generation && !page.paged) {
         const target=document.querySelector('#live-list');
         const markup=feedHTML(data);
-        if(target.innerHTML!==markup && !target.contains(document.activeElement)) target.innerHTML=markup;
+        if(target.innerHTML!==markup && !target.contains(document.activeElement) && !target.querySelector('.mission-edit:not([hidden])')) {
+          target.innerHTML=markup;
+          markDisplayed();
+        }
       }
     }
   } catch(error) { if(seq===generation && [401,404].includes(error.status)) render(); }
@@ -297,23 +281,6 @@ function go(path) {
   history.pushState({},'',path);
   window.scrollTo(0,0);
   render();
-}
-async function attachments(form) {
-  const files=[...(form.elements.files?.files||[])];
-  if(files.length>3||files.some(f=>f.size>2_000_000)) throw Error('Envie até três anexos, cada um com até 2 MB.');
-  return Promise.all(files.map(async f=>{
-    const buffer=new Uint8Array(await f.arrayBuffer());
-    const slices=[];
-    for(let i=0;i<buffer.length;i+=16384) slices.push(String.fromCharCode(...buffer.subarray(i,i+16384)));
-    return {name:f.name,data:btoa(slices.join(''))};
-  }));
-}
-function objectives(form) {
-  return [...form.querySelectorAll('[data-objective]')].map(el=>({
-    id:el.dataset.id,title:el.querySelector('[name=objective-title]').value,
-    description:el.querySelector('[name=objective-description]').value,
-    hidden:el.querySelector('[name=objective-hidden]').checked,state:el.querySelector('[name=objective-state]').value
-  }));
 }
 document.addEventListener('submit',async event=>{
   const form=event.target;
@@ -336,19 +303,17 @@ document.addEventListener('submit',async event=>{
       const targets=data.getAll('targets');
       if((values.mode==='all'||targets.length>1)&&!confirm('Confirmar publicação para '+(values.mode==='all'?form.dataset.active:targets.length)+' jogadores?')) return;
       form.dataset.requestKey ||= globalThis.crypto.randomUUID();
-      const result=await api(endpoint('resources'),{
-        ...values,requestKey:form.dataset.requestKey,targets,files:await attachments(form),
-        due:zonedTime(values.due),objectives:objectives(form)
+      await api(endpoint('resources'),{
+        ...values,requestKey:form.dataset.requestKey,targets
       });
       delete form.dataset.requestKey;
       flash('Missão publicada.');
-      go(href('missions/'+result.id));
+      go(href('missions'));
     } else {
       const id=form.dataset.id;
-      const paths={theme:'theme',settings:'character','character-admin':'member-status/'+id,'mission-edit':'mission/'+id,personal:'mission/'+id};
+      const paths={theme:'theme',settings:'character','character-admin':'member-status/'+id,'mission-edit':'mission/'+id};
       if(type==='theme') {values.radius=Number(values.radius); delete values.import;}
       if(type==='settings') localStorage.setItem('central-reduced',String(data.has('reduced')));
-      if(type==='mission-edit') {values.due=zonedTime(values.due); values.objectives=objectives(form);}
       await api(endpoint(paths[type]),values);
       await render();
       flash('Alterações salvas.');
@@ -378,10 +343,22 @@ document.addEventListener('click',async event=>{
       page.paged=true;
       document.querySelector('#live-list ul').insertAdjacentHTML('beforeend',result.items.map(page.route==='history'?historyCard:card).join(''));
       if(result.next) button.dataset.id=result.next; else button.remove();
-    } else if(name==='preview') {
-      showDialog('Prévia do anexo',`<img alt="Imagem anexada à campanha" src="/api/${endpoint('files/'+id)}?preview=1">`);
-    } else if(name==='add-objective') button.closest('form').querySelector('[data-objectives]').insertAdjacentHTML('beforeend',objectiveEditor());
-    else if(name==='remove-objective') { if(confirm('Remover este objetivo?')) button.closest('[data-objective]').remove(); }
+      markDisplayed();
+    } else if(name==='edit-mission'||name==='cancel-edit') {
+      const row=button.closest('.mission-item');
+      const editor=row.querySelector('.mission-edit');
+      if(name==='cancel-edit') editor.reset();
+      editor.hidden=name==='cancel-edit';
+      if(editor.hidden) row.querySelector('[data-action=edit-mission]').focus();
+      else editor.elements.title.focus();
+    } else if(name==='complete-mission'||name==='delete-mission') {
+      const deleting=name==='delete-mission';
+      if(deleting&&!confirm('Apagar esta missão para todos os jogadores?')) return;
+      await api(endpoint(name+'/'+id),{});
+      if(deleting) go(href('missions'));
+      else await render();
+      flash(deleting?'Missão apagada.':'Missão concluída.');
+    }
     else if(name==='export-theme') {
       const url=URL.createObjectURL(new Blob([JSON.stringify({...page.summary.theme,zone:page.summary.zone},null,2)],{type:'application/json'}));
       const a=document.createElement('a'); a.href=url;a.download='tema-central-rpg.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);
